@@ -221,7 +221,8 @@ export class ParserFeedbackSimulator implements TokenHandler {
                 case $.PRE:
                 case $.TEXTAREA:
                 case $.LISTING: {
-                    this.skipNextNewLine = true;
+                    // Matchertext content is not markup, so a newline at its start is part of it.
+                    this.skipNextNewLine = !token.matchertext;
                     break;
                 }
                 case $.IMAGE: {

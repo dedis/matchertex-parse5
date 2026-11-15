@@ -7,7 +7,9 @@ const alias = [
     { find: /^(parse5[^/]*)$/, replacement: path.resolve('./packages/$1/lib/index.ts') },
     { find: /parse5-test-utils\/(.*?)/, replacement: path.resolve('./test/$1') },
 ];
-const packages = readdirSync('./packages');
+const packages = readdirSync('./packages', { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name);
 
 export default defineConfig({
     test: {

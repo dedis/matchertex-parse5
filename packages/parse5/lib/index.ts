@@ -1,4 +1,6 @@
 import { Parser, type ParserOptions } from './parser/index.js';
+import { ERR } from './common/error-codes.js';
+import { MatchertextError, verifyMatchertext } from './common/matchertext.js';
 
 import type { DefaultTreeAdapterMap } from './tree-adapters/default.js';
 import type { TreeAdapterTypeMap } from './tree-adapters/interface.js';
@@ -23,6 +25,7 @@ export type { ElementCreationContext, TreeAdapter, TreeAdapterTypeMap } from './
 export { type ParserOptions, /** @internal */ Parser, InsertionMode } from './parser/index.js';
 export { serialize, serializeOuter, type SerializerOptions } from './serializer/index.js';
 export { ERR as ErrorCodes, type ParserError, type ParserErrorHandler } from './common/error-codes.js';
+export { MatchertextError, verifyMatchertext } from './common/matchertext.js';
 
 /** @internal */
 export * as foreignContent from './common/foreign-content.js';
@@ -105,4 +108,52 @@ export function parseFragment<T extends TreeAdapterTypeMap = DefaultTreeAdapterM
     parser.tokenizer.write(html as string, true);
 
     return parser.getFragment();
+}
+
+/**
+ * Parses an HTML document from a matchertext template and values, split as for a tagged template: `values[i]` goes
+ * between `strings[i]` and `strings[i + 1]`. The template must put each value in a matchertext hole: the content of
+ * an element `<tag [...]>` or section `<![MDATA[...]]>`, or an attribute value `name=[...]`. A value becomes data of
+ * its hole without being tokenized, normalized as input is. Each value must be matchertext.
+ *
+ * Throws a {@link MatchertextError} for a value that is not matchertext, a value outside a hole, or malformed
+ * matchertext in the template.
+ *
+ * @example
+ *
+ * ```js
+ * const parse5 = require('parse5');
+ *
+ * const document = parse5.composeHtml(['<p title=[', '] [', ']>'], ['a "title"', '<b>not markup</b>']);
+ * ```
+ *
+ * @param strings The template strings, one more than the values.
+ * @param values The values.
+ * @param options Parsing options. The matchertext syntax is always enabled.
+ */
+export function composeHtml<T extends TreeAdapterTypeMap = DefaultTreeAdapterMap>(
+    strings: readonly string[],
+    values: readonly string[],
+    options?: ParserOptions<T>,
+): T['document'] {
+    if (strings.length !== values.length + 1) {
+        throw new TypeError('composeHtml needs one more template string than values');
+    }
+
+    for (const value of values) {
+        if (!verifyMatchertext(value)) {
+            throw new MatchertextError(ERR.matchertextInvalidArgument, null);
+        }
+    }
+
+    const parser = new Parser<T>({ ...options, matchertext: true });
+
+    for (let i = 0; i < values.length; i++) {
+        parser.tokenizer.write(strings[i], false);
+        parser.tokenizer.insertMatchertextValue(values[i]);
+    }
+
+    parser.tokenizer.write(strings[values.length], true);
+
+    return parser.document;
 }

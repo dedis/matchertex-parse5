@@ -9,6 +9,19 @@ const tokenizerOpts = {
 };
 
 generateTokenizationTests('Tokenizer', dataPath, (handler) => new Tokenizer(tokenizerOpts, handler));
+// The matchertext option changes only the tokens of matchertext syntax.
+generateTokenizationTests(
+    'Tokenizer (matchertext)',
+    dataPath,
+    (handler) => new Tokenizer({ ...tokenizerOpts, matchertext: true }, handler),
+    {
+        expectErrors: [
+            // `[` where an attribute name starts opens matchertext element content, which these inputs do not close.
+            '6208.test3',
+            '6250.test3',
+        ],
+    },
+);
 
 function noop(): void {
     // Noop

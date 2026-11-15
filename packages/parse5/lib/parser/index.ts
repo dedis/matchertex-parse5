@@ -6,6 +6,7 @@ import * as doctype from '../common/doctype.js';
 import * as foreignContent from '../common/foreign-content.js';
 import { ERR, type ParserErrorHandler } from '../common/error-codes.js';
 import * as unicode from '../common/unicode.js';
+import { MatchertextError } from '../common/matchertext.js';
 import {
     TAG_ID as $,
     TAG_NAMES as TN,
@@ -97,6 +98,19 @@ const BASE_LOC = {
 
 const TABLE_STRUCTURE_TAGS = new Set([$.TABLE, $.TBODY, $.TFOOT, $.THEAD, $.TR]);
 
+// Insertion modes that insert text into the current element.
+const TEXT_INSERTION_MODES = new Set([
+    InsertionMode.IN_BODY,
+    InsertionMode.TEXT,
+    InsertionMode.IN_CAPTION,
+    InsertionMode.IN_CELL,
+    InsertionMode.IN_SELECT,
+    InsertionMode.IN_SELECT_IN_TABLE,
+    InsertionMode.IN_TEMPLATE,
+]);
+// Insertion modes that insert text into the current element unless it is a table structure element.
+const TABLE_INSERTION_MODES = new Set([InsertionMode.IN_TABLE, InsertionMode.IN_TABLE_BODY, InsertionMode.IN_ROW]);
+
 interface InsertionLocation<T extends TreeAdapterTypeMap> {
     parent: T['parentNode'];
     beforeElement: T['element'] | null;
@@ -136,6 +150,15 @@ export interface ParserOptions<T extends TreeAdapterTypeMap> {
      * @default `null`
      */
     onParseError?: ParserErrorHandler | null;
+
+    /**
+     * Enables the matchertext syntax, as `TokenizerOptions.matchertext` describes. The content of a matchertext
+     * element becomes text of the element. If the element is not inserted or cannot hold text where it is, as
+     * `<br [x]>` or `<table [x]>`, the parser throws a {@link MatchertextError}.
+     *
+     * @default `false`
+     */
+    matchertext?: boolean;
 }
 
 const defaultParserOptions: Required<ParserOptions<DefaultTreeAdapterMap>> = {
@@ -143,6 +166,7 @@ const defaultParserOptions: Required<ParserOptions<DefaultTreeAdapterMap>> = {
     sourceCodeLocationInfo: false,
     treeAdapter: defaultTreeAdapter,
     onParseError: null,
+    matchertext: false,
 };
 
 //Parser
@@ -1122,12 +1146,40 @@ export class Parser<T extends TreeAdapterTypeMap> implements TokenHandler, Stack
     onStartTag(token: TagToken): void {
         this.skipNextNewLine = false;
         this.currentToken = token;
+        const previous = this.openElements.current;
 
         this._processStartTag(token);
+
+        if (token.matchertext) {
+            this._checkMatchertextElement(token, previous);
+        }
 
         if (token.selfClosing && !token.ackSelfClosing) {
             this._err(token, ERR.nonVoidHtmlElementStartTagWithTrailingSolidus);
         }
+    }
+
+    /**
+     * Check that the content of the matchertext element of start tag `token` becomes its text: the tag inserted a
+     * new current element, and the parser inserts text into it.
+     */
+    private _checkMatchertextElement(token: TagToken, previous: T['parentNode'] | undefined): void {
+        const { current, currentTagId } = this.openElements;
+        const holdsText =
+            current !== previous &&
+            current !== undefined &&
+            this.treeAdapter.getTagName(current as T['element']) === token.tagName &&
+            (this.tokenizer.inForeignNode ||
+                TEXT_INSERTION_MODES.has(this.insertionMode) ||
+                (TABLE_INSERTION_MODES.has(this.insertionMode) && !TABLE_STRUCTURE_TAGS.has(currentTagId as $)));
+
+        if (!holdsText) {
+            const code = ERR.matchertextElementCannotHoldText;
+            throw new MatchertextError(code, this.tokenizer.preprocessor.getError(code, 0));
+        }
+
+        // The content is not markup, so a newline after `<pre>` or `<textarea>` is part of it.
+        this.skipNextNewLine = false;
     }
     /**
      * Processes a given start tag.

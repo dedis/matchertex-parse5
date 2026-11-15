@@ -10,6 +10,12 @@ generateTokenizationTests(
     feedbackPath,
     (handler) => new ParserFeedbackSimulator({}, handler).tokenizer,
 );
+// The suite has no matchertext syntax, so the matchertext option must not change its tokens.
+generateTokenizationTests(
+    'ParserFeedbackSimulator (matchertext)',
+    feedbackPath,
+    (handler) => new ParserFeedbackSimulator({ matchertext: true }, handler).tokenizer,
+);
 
 it('does constant work per namespace push and pop', () => {
     const noop = (): void => {};

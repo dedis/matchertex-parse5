@@ -11,50 +11,53 @@ function pause(): Promise<void> {
 
 const suitePath = new URL('../../../test/data/tree-construction-scripting', import.meta.url);
 
-generateParsingTests(
-    'ParserStream - Scripting',
-    'ParserStream - Scripting',
-    {
-        withoutErrors: true,
-        suitePath,
-    },
-    async (test, opts) => {
-        const chunks = makeChunks(test.input);
-        const parser = test.fragmentContext
-            ? ParserStream.getFragmentStream(test.fragmentContext, opts)
-            : new ParserStream(opts);
+// The suite has no matchertext syntax, so the matchertext option must not change its trees.
+for (const matchertext of [false, true]) {
+    generateParsingTests(
+        matchertext ? 'ParserStream - Scripting (matchertext)' : 'ParserStream - Scripting',
+        'ParserStream - Scripting',
+        {
+            withoutErrors: true,
+            suitePath,
+        },
+        async (test, opts) => {
+            const chunks = makeChunks(test.input);
+            const parser = test.fragmentContext
+                ? ParserStream.getFragmentStream(test.fragmentContext, { ...opts, matchertext })
+                : new ParserStream({ ...opts, matchertext });
 
-        parser.on('script', async (scriptElement, documentWrite, resume) => {
-            const scriptTextNode = opts.treeAdapter.getChildNodes(scriptElement)[0];
-            const script = scriptTextNode ? opts.treeAdapter.getTextNodeContent(scriptTextNode) : '';
+            parser.on('script', async (scriptElement, documentWrite, resume) => {
+                const scriptTextNode = opts.treeAdapter.getChildNodes(scriptElement)[0];
+                const script = scriptTextNode ? opts.treeAdapter.getTextNodeContent(scriptTextNode) : '';
 
-            //NOTE: emulate postponed script execution
-            await pause();
+                //NOTE: emulate postponed script execution
+                await pause();
 
-            try {
-                runInNewContext(script, { document: { write: documentWrite } });
-                resume();
-            } catch (error) {
-                parser.emit('error', error);
+                try {
+                    runInNewContext(script, { document: { write: documentWrite } });
+                    resume();
+                } catch (error) {
+                    parser.emit('error', error);
+                }
+            });
+
+            //NOTE: emulate async input stream behavior
+            for (const chunk of chunks) {
+                parser.write(chunk);
+                await pause();
             }
-        });
 
-        //NOTE: emulate async input stream behavior
-        for (const chunk of chunks) {
-            parser.write(chunk);
-            await pause();
-        }
+            parser.end();
 
-        parser.end();
+            await finished(parser);
 
-        await finished(parser);
-
-        return {
-            node: test.fragmentContext ? parser.getFragment() : parser.document,
-            chunks,
-        };
-    },
-);
+            return {
+                node: test.fragmentContext ? parser.getFragment() : parser.document,
+                chunks,
+            };
+        },
+    );
+}
 
 generateTestsForEachTreeAdapter('ParserStream', (treeAdapter) => {
     it('Regression - Synchronously calling resume() leads to crash (GH-98)', async () => {

@@ -30,6 +30,7 @@ export enum CODE_POINTS {
     QUESTION_MARK = 0x3f,
     LATIN_CAPITAL_A = 0x41,
     LATIN_CAPITAL_Z = 0x5a,
+    LEFT_SQUARE_BRACKET = 0x5b,
     RIGHT_SQUARE_BRACKET = 0x5d,
     GRAVE_ACCENT = 0x60,
     LATIN_SMALL_A = 0x61,
@@ -39,6 +40,7 @@ export enum CODE_POINTS {
 export const SEQUENCES = {
     DASH_DASH: '--',
     CDATA_START: '[CDATA[',
+    MDATA_START: '[MDATA[',
     DOCTYPE: 'doctype',
     SCRIPT: 'script',
     PUBLIC: 'public',

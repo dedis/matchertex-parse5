@@ -7,23 +7,26 @@ import type { DefaultTreeAdapterTypes } from 'parse5';
 
 type Element = DefaultTreeAdapterTypes.Element;
 
-generateParsingTests(
-    'ParserStream',
-    'ParserStream',
-    {
-        expectErrors: [
-            //TODO(GH-448): Foreign content behaviour was updated in the HTML spec.
-            //The old test suite still tests the old behaviour.
-            '0.foreign-fragment',
-            '1.foreign-fragment',
-            '38.foreign-fragment',
-            '40.foreign-fragment',
-            '47.foreign-fragment',
-            '48.foreign-fragment',
-        ],
-    },
-    (test, opts) => parseChunked(test, opts),
-);
+// The suite has no matchertext syntax, so the matchertext option must not change its trees.
+for (const matchertext of [false, true]) {
+    generateParsingTests(
+        matchertext ? 'ParserStream (matchertext)' : 'ParserStream',
+        'ParserStream',
+        {
+            expectErrors: [
+                //TODO(GH-448): Foreign content behaviour was updated in the HTML spec.
+                //The old test suite still tests the old behaviour.
+                '0.foreign-fragment',
+                '1.foreign-fragment',
+                '38.foreign-fragment',
+                '40.foreign-fragment',
+                '47.foreign-fragment',
+                '48.foreign-fragment',
+            ],
+        },
+        (test, opts) => parseChunked(test, { ...opts, matchertext }),
+    );
+}
 
 describe('ParserStream', () => {
     it('Fix empty stream parsing with ParserStream (GH-196)', async () => {

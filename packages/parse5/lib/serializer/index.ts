@@ -2,6 +2,8 @@ import { TAG_NAMES as $, NS, hasUnescapedText } from '../common/html.js';
 import { escapeText, escapeAttribute } from 'entities/escape';
 import type { TreeAdapter, TreeAdapterTypeMap } from '../tree-adapters/interface.js';
 import { defaultTreeAdapter, type DefaultTreeAdapterMap } from '../tree-adapters/default.js';
+import { ERR } from '../common/error-codes.js';
+import { MatchertextError, verifyMatchertext } from '../common/matchertext.js';
 
 // Sets
 const VOID_ELEMENTS = new Set<string>([
@@ -47,11 +49,126 @@ export interface SerializerOptions<T extends TreeAdapterTypeMap> {
      *  @default `true`
      */
     scriptingEnabled?: boolean;
+    /**
+     * Refuses a tree that a parser would read back with a different structure, and throws a `MatchertextError` for
+     * it: raw text that contains the end tag of its element or that has a child which is not text, `plaintext`,
+     * which no end tag ends, and comment data that ends the comment. Also writes the line feed that a parser drops
+     * at the start of `pre`, `textarea` and `listing` content. The line breaks and NUL characters that a parser
+     * normalizes are not kept.
+     *
+     * Set to `false` for the output of the HTML fragment serialization algorithm, which can write such a tree as
+     * markup that a parser reads as other elements.
+     *
+     * @default `true`
+     */
+    matchertext?: boolean;
+    /**
+     * Writes a raw text element that {@link SerializerOptions.matchertext} refuses as the matchertext element
+     * `<tag attrs [text]>` if its text is matchertext. Only a matchertext parser reads such output. Implies
+     * {@link SerializerOptions.matchertext}.
+     *
+     * @default `false`
+     */
+    matchertextOutput?: boolean;
 }
 
 type InternalOptions<T extends TreeAdapterTypeMap> = Required<SerializerOptions<T>>;
 
-const defaultOpts: InternalOptions<DefaultTreeAdapterMap> = { treeAdapter: defaultTreeAdapter, scriptingEnabled: true };
+const defaultOpts: InternalOptions<DefaultTreeAdapterMap> = {
+    treeAdapter: defaultTreeAdapter,
+    scriptingEnabled: true,
+    matchertext: true,
+    matchertextOutput: false,
+};
+
+// Elements whose content a parser reads without a leading line feed.
+const LEADING_LINE_FEED_DROPPED = new Set<string>([$.PRE, $.TEXTAREA, $.LISTING]);
+
+/**
+ * Report whether `s` has at offset `i` a tag start: `prefix`, then `name` in any ASCII case, then a character that
+ * ends a tag name. At the end of `s`, the end tag written after `s` continues the tag name, so that is no tag start.
+ */
+function tagAt(s: string, i: number, prefix: string, name: string): boolean {
+    const nameStart = i + prefix.length;
+    const nameEnd = nameStart + name.length;
+
+    if (nameEnd >= s.length || !s.startsWith(prefix, i)) {
+        return false;
+    }
+
+    for (let k = 0; k < name.length; k++) {
+        const c = s.charCodeAt(nameStart + k);
+
+        if ((c >= 0x41 && c <= 0x5a ? c + 0x20 : c) !== name.charCodeAt(k)) {
+            return false;
+        }
+    }
+
+    return '\t\n\f\r />'.includes(s[nameEnd]);
+}
+
+/**
+ * Report whether a parser, reading `text` as the content of the raw text element `tn`, would not end the element
+ * at the end tag written after `text`: because `text` contains that end tag, because `text` is a script that
+ * leaves the parser in the state in which that end tag does not end the script, or because no end tag ends
+ * `plaintext`.
+ *
+ * @see {@link https://html.spec.whatwg.org/multipage/parsing.html#script-data-state}
+ */
+function rawTextEndsEarly(tn: string, text: string): boolean {
+    if (tn === $.PLAINTEXT) {
+        return true;
+    }
+
+    const DATA = 0; // An end tag ends the element.
+    const ESCAPED = 1; // After `<!--`: an end tag ends the element.
+    const DOUBLE_ESCAPED = 2; // After `<!--<script`: an end tag returns to ESCAPED.
+    let state = DATA;
+
+    for (let i = 0; i < text.length; i++) {
+        if (state !== DOUBLE_ESCAPED && tagAt(text, i, '</', tn)) {
+            return true;
+        }
+
+        if (tn !== $.SCRIPT) {
+            continue;
+        }
+
+        if (state === DATA && text.startsWith('<!--', i)) {
+            state = ESCAPED;
+            // The dashes can also end the escape, as in `<!-->`.
+            i++;
+        } else if (state !== DATA && text.startsWith('-->', i)) {
+            state = DATA;
+            i += 2;
+        } else if (state === ESCAPED && tagAt(text, i, '<', $.SCRIPT)) {
+            state = DOUBLE_ESCAPED;
+        } else if (state === DOUBLE_ESCAPED && tagAt(text, i, '</', $.SCRIPT)) {
+            state = ESCAPED;
+        }
+    }
+
+    return state === DOUBLE_ESCAPED;
+}
+
+/** Report whether a parser would read `<!--data-->` back as other than one comment with `data`. */
+function commentEndsEarly(data: string): boolean {
+    return data.startsWith('>') || data.startsWith('->') || data.includes('-->') || data.includes('--!>');
+}
+
+/** Return the text of raw text element `node`, or throw if a child is not text. */
+function getRawText<T extends TreeAdapterTypeMap>(node: T['element'], { treeAdapter }: InternalOptions<T>): string {
+    let text = '';
+
+    for (const child of treeAdapter.getChildNodes(node)) {
+        if (!treeAdapter.isTextNode(child)) {
+            throw new MatchertextError(ERR.matchertextUnserializableText, null);
+        }
+        text += treeAdapter.getTextNodeContent(child);
+    }
+
+    return text;
+}
 
 /**
  * Serializes an AST node to an HTML string.
@@ -130,6 +247,7 @@ export function serializeOuter<T extends TreeAdapterTypeMap = DefaultTreeAdapter
 
 function serializeNodes<T extends TreeAdapterTypeMap>(nodes: T['node'][], options: InternalOptions<T>): string {
     const { treeAdapter } = options;
+    const guarded = options.matchertext || options.matchertextOutput;
     // The depth of the tree is not bounded, so the open elements (their
     // remaining siblings and end tags) are kept on explicit stacks.
     const stack: { nodes: T['node'][]; index: number; endTag: string }[] = [];
@@ -142,10 +260,34 @@ function serializeNodes<T extends TreeAdapterTypeMap>(nodes: T['node'][], option
 
             if (treeAdapter.isElementNode(node)) {
                 const tn = treeAdapter.getTagName(node);
+                const isHtml = treeAdapter.getNamespaceURI(node) === NS.HTML;
+
+                if (guarded && isHtml && hasUnescapedText(tn, options.scriptingEnabled)) {
+                    const text = getRawText(node, options);
+
+                    if (rawTextEndsEarly(tn, text)) {
+                        if (!options.matchertextOutput || !verifyMatchertext(text)) {
+                            throw new MatchertextError(ERR.matchertextUnserializableText, null);
+                        }
+
+                        html += `<${tn}${serializeAttributes(node, options)} [${text}]>`;
+                        continue;
+                    }
+                }
 
                 html += `<${tn}${serializeAttributes(node, options)}>`;
 
-                const isHtml = treeAdapter.getNamespaceURI(node) === NS.HTML;
+                if (guarded && isHtml && LEADING_LINE_FEED_DROPPED.has(tn)) {
+                    const first = treeAdapter.getFirstChild(node);
+
+                    if (
+                        first &&
+                        treeAdapter.isTextNode(first) &&
+                        treeAdapter.getTextNodeContent(first).startsWith('\n')
+                    ) {
+                        html += '\n';
+                    }
+                }
 
                 if (!(isHtml && VOID_ELEMENTS.has(tn))) {
                     stack.push({ nodes, index, endTag: `</${tn}>` });
@@ -158,6 +300,9 @@ function serializeNodes<T extends TreeAdapterTypeMap>(nodes: T['node'][], option
             } else if (treeAdapter.isTextNode(node)) {
                 html += serializeTextNode(node, options);
             } else if (treeAdapter.isCommentNode(node)) {
+                if (guarded && commentEndsEarly(treeAdapter.getCommentNodeContent(node))) {
+                    throw new MatchertextError(ERR.matchertextUnserializableComment, null);
+                }
                 html += serializeCommentNode(node, options);
             } else if (treeAdapter.isDocumentTypeNode(node)) {
                 html += serializeDocumentTypeNode(node, options);

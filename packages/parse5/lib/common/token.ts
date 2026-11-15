@@ -75,6 +75,8 @@ export interface TagToken extends TokenBase {
     ackSelfClosing: boolean;
     attrs: Attribute[];
     location: LocationWithAttributes | null;
+    /** Set on the start tag and the end tag of a matchertext element `<tag attrs [content]>`. */
+    matchertext?: boolean;
 }
 
 export function getTokenAttr(token: TagToken, attrName: string): string | null {

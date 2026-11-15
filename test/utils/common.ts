@@ -131,3 +131,26 @@ export function getSubstringByLineCol(lines: string[], loc: Token.Location): str
 export function finished(stream: Writable | Readable): Promise<void> {
     return new Promise((resolve, reject) => finishedCb(stream, (err) => (err ? reject(err) : resolve())));
 }
+
+/** A deterministic pseudo-random generator (mulberry32), so that a failure reproduces. */
+export function random(seed: number): () => number {
+    return (): number => {
+        // `>>> 0` wraps the sum to 32 bits, as the algorithm needs.
+        seed = (seed + 0x6d_2b_79_f5) >>> 0;
+        let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+        t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+        return ((t ^ (t >>> 14)) >>> 0) / 4_294_967_296;
+    };
+}
+
+/** A string of up to `maxLength` pieces of `alphabet`. */
+export function randomString(next: () => number, alphabet: readonly string[], maxLength: number): string {
+    let s = '';
+    const length = Math.floor(next() * (maxLength + 1));
+
+    for (let i = 0; i < length; i++) {
+        s += alphabet[Math.floor(next() * alphabet.length)];
+    }
+
+    return s;
+}

@@ -218,16 +218,37 @@ export function generateTokenizationTests(
     prefix: string,
     testSuite: string,
     createTokenSource: TokenSourceCreator,
+    { expectErrors = [] }: { expectErrors?: string[] } = {},
 ): void {
+    const errorsToExpect = new Set(expectErrors);
+
     for (const testData of loadTests(testSuite)) {
         const testName = `${prefix} - ${testData.idx}.${testData.setName} - ${testData.name} - Initial state: ${testData.initialStateName}`;
+        const expectError = errorsToExpect.delete(`${testData.idx}.${testData.setName}`);
 
         it(testName, () => {
             const chunks = makeChunks(testData.input);
-            const result = tokenize(createTokenSource, chunks, testData);
 
-            assert.deepEqual(result.tokens, testData.expected, `Chunks: ${JSON.stringify(chunks)}`);
-            assert.deepEqual(result.errors, testData.expectedErrors || []);
+            try {
+                const result = tokenize(createTokenSource, chunks, testData);
+
+                assert.deepEqual(result.tokens, testData.expected, `Chunks: ${JSON.stringify(chunks)}`);
+                assert.deepEqual(result.errors, testData.expectedErrors || []);
+            } catch (error) {
+                if (expectError) {
+                    return;
+                }
+
+                throw error;
+            }
+
+            if (expectError) {
+                throw new Error('Expected error but none was thrown');
+            }
         });
+    }
+
+    if (errorsToExpect.size > 0) {
+        throw new Error(`Expected errors were not found: ${[...errorsToExpect].join(', ')}`);
     }
 }

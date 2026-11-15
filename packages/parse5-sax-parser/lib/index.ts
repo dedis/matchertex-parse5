@@ -1,5 +1,5 @@
 import { Transform } from 'node:stream';
-import type { Tokenizer, TokenHandler, Token } from 'parse5';
+import { MatchertextError, type Tokenizer, type TokenHandler, type Token } from 'parse5';
 import { DevNullStream } from './dev-null-stream.js';
 import { ParserFeedbackSimulator } from './parser-feedback-simulator.js';
 
@@ -10,6 +10,14 @@ export interface SAXParserOptions {
      * When enabled, each token will have a `sourceCodeLocation` property.
      */
     sourceCodeLocationInfo?: boolean;
+    /**
+     * Enables the matchertext syntax, as the `matchertext` option of `parse5` describes. The content of a
+     * matchertext element is one text token between its start and end tags. Malformed matchertext fails the
+     * stream with a `MatchertextError`.
+     *
+     * @default `false`
+     */
+    matchertext?: boolean;
 }
 
 /**
@@ -78,12 +86,29 @@ export class SAXParser extends Transform implements TokenHandler {
             throw new TypeError('Parser can work only with string streams.');
         }
 
-        callback(null, this._transformChunk(chunk));
+        this._transformAndCall(chunk, callback);
     }
 
     override _final(callback: (error?: Error | null, data?: string) => void): void {
         this.lastChunkWritten = true;
-        callback(null, this._transformChunk(''));
+        this._transformAndCall('', callback);
+    }
+
+    /** Transform `chunk` and call `callback` with the result, or with the matchertext error that parsing throws. */
+    private _transformAndCall(chunk: string, callback: (error?: Error | null, data?: string) => void): void {
+        let data: string;
+
+        try {
+            data = this._transformChunk(chunk);
+        } catch (error) {
+            if (!(error instanceof MatchertextError)) {
+                throw error;
+            }
+            callback(error);
+            return;
+        }
+
+        callback(null, data);
     }
 
     /**

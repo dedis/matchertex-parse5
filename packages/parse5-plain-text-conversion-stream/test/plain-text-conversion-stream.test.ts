@@ -14,9 +14,10 @@ generateTestsForEachTreeAdapter('plain-test-conversion-stream', (treeAdapter) =>
 
         const result = serialize(converter.document, { treeAdapter });
 
+        // The text starts with a line feed, so the serializer writes the one that a parser drops after `<pre>`.
         assert.strictEqual(
             result,
-            '<html><head></head><body><pre>\nHey\nyo\uFFFD&lt;html&gt;&lt;head&gt;&lt;body&gt;</pre></body></html>',
+            '<html><head></head><body><pre>\n\nHey\nyo\uFFFD&lt;html&gt;&lt;head&gt;&lt;body&gt;</pre></body></html>',
         );
     });
 });

@@ -1,5 +1,11 @@
 import { Writable } from 'node:stream';
-import { Parser, type ParserOptions, type TreeAdapterTypeMap, type DefaultTreeAdapterMap } from 'parse5';
+import {
+    MatchertextError,
+    Parser,
+    type ParserOptions,
+    type TreeAdapterTypeMap,
+    type DefaultTreeAdapterMap,
+} from 'parse5';
 
 /**
  * Streaming HTML parser with scripting support.
@@ -36,7 +42,7 @@ export class ParserStream<T extends TreeAdapterTypeMap = DefaultTreeAdapterMap> 
     }
 
     private lastChunkWritten = false;
-    private writeCallback: undefined | (() => void) = undefined;
+    private writeCallback: undefined | ((error?: Error | null) => void) = undefined;
 
     private pendingHtmlInsertions: string[] = [];
     /** The resulting document node. */
@@ -80,14 +86,16 @@ export class ParserStream<T extends TreeAdapterTypeMap = DefaultTreeAdapterMap> 
         super({ decodeStrings: false });
 
         const resume = (): void => {
-            for (let i = this.pendingHtmlInsertions.length - 1; i >= 0; i--) {
-                this.parser.tokenizer.insertHtmlAtCurrentPos(this.pendingHtmlInsertions[i]);
-            }
+            this._runTokenizer(() => {
+                for (let i = this.pendingHtmlInsertions.length - 1; i >= 0; i--) {
+                    this.parser.tokenizer.insertHtmlAtCurrentPos(this.pendingHtmlInsertions[i]);
+                }
 
-            this.pendingHtmlInsertions.length = 0;
+                this.pendingHtmlInsertions.length = 0;
 
-            //NOTE: keep parsing if we don't wait for the next input chunk
-            this.parser.tokenizer.resume(this.writeCallback);
+                //NOTE: keep parsing if we don't wait for the next input chunk
+                this.parser.tokenizer.resume(this.writeCallback);
+            });
         };
 
         const documentWrite = (html: string): void => {
@@ -107,13 +115,25 @@ export class ParserStream<T extends TreeAdapterTypeMap = DefaultTreeAdapterMap> 
     }
 
     //WritableStream implementation
-    override _write(chunk: string, _encoding: string, callback: () => void): void {
+    override _write(chunk: string, _encoding: string, callback: (error?: Error | null) => void): void {
         if (typeof chunk !== 'string') {
             throw new TypeError('Parser can work only with string streams.');
         }
 
         this.writeCallback = callback;
-        this.parser.tokenizer.write(chunk, this.lastChunkWritten, this.writeCallback);
+        this._runTokenizer(() => this.parser.tokenizer.write(chunk, this.lastChunkWritten, this.writeCallback));
+    }
+
+    /** Run `parse`, and fail the pending write with the matchertext error that it throws. */
+    private _runTokenizer(parse: () => void): void {
+        try {
+            parse();
+        } catch (error) {
+            if (!(error instanceof MatchertextError)) {
+                throw error;
+            }
+            this.writeCallback?.(error);
+        }
     }
 
     // TODO [engine:node@>=16]: Due to issues with Node < 16, we are overriding `end` instead of `_final`.

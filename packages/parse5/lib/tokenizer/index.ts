@@ -22,6 +22,7 @@ import {
 import { HtmlEntityDecoder, DecodingMode } from 'entities/decode';
 import { ERR, type ParserErrorHandler } from '../common/error-codes.js';
 import { TAG_ID, getTagID } from '../common/html.js';
+import { MAX_MATCHER_DEPTH, MatchertextError, matcherKind } from '../common/matchertext.js';
 
 // The few attributes a tag usually has are scanned for a duplicate name; from this many on, the names are
 // collected in a Set instead, so that the check doesn't get quadratic in the number of attributes.
@@ -102,6 +103,12 @@ const enum State {
     CDATA_SECTION_END,
     CHARACTER_REFERENCE,
     AMBIGUOUS_AMPERSAND,
+    MT_ELEMENT_CONTENT,
+    MT_ELEMENT_END,
+    MT_ATTRIBUTE_VALUE,
+    MT_SECTION,
+    MT_SECTION_BRACKET,
+    MT_SECTION_END,
 }
 
 //Tokenizer initial states for different modes
@@ -149,6 +156,14 @@ function isWhitespace(cp: number): boolean {
     );
 }
 
+function getCharacterTokenType(cp: number): CharacterToken['type'] {
+    return isWhitespace(cp)
+        ? TokenType.WHITESPACE_CHARACTER
+        : cp === $.NULL
+          ? TokenType.NULL_CHARACTER
+          : TokenType.CHARACTER;
+}
+
 function isScriptDataDoubleEscapeSequenceEnd(cp: number): boolean {
     return isWhitespace(cp) || cp === $.SOLIDUS || cp === $.GREATER_THAN_SIGN;
 }
@@ -171,6 +186,15 @@ function getErrorForNumericCharacterReference(code: number): ERR | null {
 
 export interface TokenizerOptions {
     sourceCodeLocationInfo?: boolean;
+    /**
+     * Enables the matchertext syntax: the element `<tag attrs [content]>`, the attribute value `name=[value]` and
+     * the section `<![MDATA[content]]>`. The content is not markup and has no character references: it ends at the
+     * `]` that matches its opening `[`, with the matcher pairs `()`, `[]` and `{}` matched in between. Malformed
+     * matchertext throws a {@link MatchertextError}.
+     *
+     * @default `false`
+     */
+    matchertext?: boolean;
 }
 
 export interface TokenHandler {
@@ -235,6 +259,9 @@ export class Tokenizer {
      */
     protected runStart = 0;
     protected runEnd = 0;
+    /** The open matchers of the matchertext hole being read, its `[` first. The value in it nests one less deep. */
+    private readonly holeMatchers = new Uint8Array(MAX_MATCHER_DEPTH + 1);
+    private holeDepth = 0;
 
     constructor(
         protected options: TokenizerOptions,
@@ -250,13 +277,7 @@ export class Tokenizer {
                 this.preprocessor.pos = this.entityStartPos + consumed - 1;
 
                 if (!this._isCharacterReferenceInAttribute()) {
-                    this._ensureCharacterToken(
-                        isWhitespace(cp)
-                            ? TokenType.WHITESPACE_CHARACTER
-                            : cp === $.NULL
-                              ? TokenType.NULL_CHARACTER
-                              : TokenType.CHARACTER,
-                    );
+                    this._ensureCharacterToken(getCharacterTokenType(cp));
                 }
 
                 this._extendRunWith(String.fromCodePoint(cp), 0);
@@ -460,6 +481,29 @@ export class Tokenizer {
         this._runParsingLoop();
     }
 
+    /**
+     * @internal Append `value` as data to the matchertext hole in which the input written so far ends, without
+     * tokenizing it. The value is normalized as input is: CR and CRLF become LF, and NUL becomes U+FFFD.
+     */
+    public insertMatchertextValue(value: string): void {
+        const data = value.replace(/\r\n?/g, '\n').replace(/\0/g, REPLACEMENT_CHARACTER);
+
+        switch (this.state) {
+            case State.MT_ATTRIBUTE_VALUE: {
+                this._flushRun(data);
+                break;
+            }
+            case State.MT_ELEMENT_CONTENT:
+            case State.MT_SECTION: {
+                this._emitData(data);
+                break;
+            }
+            default: {
+                this._failMatchertext(ERR.matchertextArgumentOutsideHole);
+            }
+        }
+    }
+
     /** @internal Flush completed streaming text without splitting an unfinished token. */
     public flushCurrentCharacterToken(): void {
         // Only completed text is flushed: an unfinished token stays intact, including a doctype that has no token yet.
@@ -541,7 +585,8 @@ export class Tokenizer {
         };
     }
 
-    protected _createEndTagToken(): void {
+    /** Create an end tag token whose source starts `offset` code points before the current one. */
+    protected _createEndTagToken(offset = 2): void {
         this._flushRun('');
         this.currentToken = {
             type: TokenType.END_TAG,
@@ -550,7 +595,7 @@ export class Tokenizer {
             selfClosing: false,
             ackSelfClosing: false,
             attrs: [],
-            location: this.getCurrentLocation(2),
+            location: this.getCurrentLocation(offset),
         };
     }
 
@@ -837,11 +882,7 @@ export class Tokenizer {
 
     /** Emit the current input code point, read as `cp`. */
     protected _emitCodePoint(cp: number): void {
-        const type = isWhitespace(cp)
-            ? TokenType.WHITESPACE_CHARACTER
-            : cp === $.NULL
-              ? TokenType.NULL_CHARACTER
-              : TokenType.CHARACTER;
+        const type = getCharacterTokenType(cp);
         const token = this.currentCharacterToken;
 
         if (token === null || token.type !== type) {
@@ -1191,6 +1232,30 @@ export class Tokenizer {
             }
             case State.AMBIGUOUS_AMPERSAND: {
                 this._stateAmbiguousAmpersand(cp);
+                break;
+            }
+            case State.MT_ELEMENT_CONTENT: {
+                this._stateMatchertextElementContent(cp);
+                break;
+            }
+            case State.MT_ELEMENT_END: {
+                this._stateMatchertextElementEnd(cp);
+                break;
+            }
+            case State.MT_ATTRIBUTE_VALUE: {
+                this._stateMatchertextAttributeValue(cp);
+                break;
+            }
+            case State.MT_SECTION: {
+                this._stateMatchertextSection(cp);
+                break;
+            }
+            case State.MT_SECTION_BRACKET: {
+                this._stateMatchertextSectionBracket(cp);
+                break;
+            }
+            case State.MT_SECTION_END: {
+                this._stateMatchertextSectionEnd(cp);
                 break;
             }
             default: {
@@ -1910,9 +1975,13 @@ export class Tokenizer {
                 break;
             }
             default: {
-                this._createAttr('');
-                this.state = State.ATTRIBUTE_NAME;
-                this._stateAttributeName(cp);
+                if (cp === $.LEFT_SQUARE_BRACKET && this.options.matchertext) {
+                    this._startMatchertextElement();
+                } else {
+                    this._createAttr('');
+                    this.state = State.ATTRIBUTE_NAME;
+                    this._stateAttributeName(cp);
+                }
             }
         }
     }
@@ -1986,9 +2055,13 @@ export class Tokenizer {
                 break;
             }
             default: {
-                this._createAttr('');
-                this.state = State.ATTRIBUTE_NAME;
-                this._stateAttributeName(cp);
+                if (cp === $.LEFT_SQUARE_BRACKET && this.options.matchertext) {
+                    this._startMatchertextElement();
+                } else {
+                    this._createAttr('');
+                    this.state = State.ATTRIBUTE_NAME;
+                    this._stateAttributeName(cp);
+                }
             }
         }
     }
@@ -2019,8 +2092,13 @@ export class Tokenizer {
                 break;
             }
             default: {
-                this.state = State.ATTRIBUTE_VALUE_UNQUOTED;
-                this._stateAttributeValueUnquoted(cp);
+                if (cp === $.LEFT_SQUARE_BRACKET && this.options.matchertext) {
+                    this._openHole();
+                    this.state = State.MT_ATTRIBUTE_VALUE;
+                } else {
+                    this.state = State.ATTRIBUTE_VALUE_UNQUOTED;
+                    this._stateAttributeValueUnquoted(cp);
+                }
             }
         }
     }
@@ -2235,6 +2313,9 @@ export class Tokenizer {
                 (this.currentToken as CommentToken).data = '[CDATA[';
                 this.state = State.BOGUS_COMMENT;
             }
+        } else if (this.options.matchertext && this._consumeSequenceIfMatch($$.MDATA_START, true)) {
+            this._openHole();
+            this.state = State.MT_SECTION;
         }
 
         //NOTE: Sequence lookups can be abrupted by hibernation. In that case, lookup
@@ -3203,5 +3284,174 @@ export class Tokenizer {
             this.state = this.returnState;
             this._callState(cp);
         }
+    }
+
+    // Matchertext
+    //------------------------------------------------------------------
+    protected _failMatchertext(code: ERR): never {
+        throw new MatchertextError(code, this.preprocessor.getError(code, 0));
+    }
+
+    /** Open a hole at the `[` just read. */
+    protected _openHole(): void {
+        this.holeMatchers[0] = matcherKind($.LEFT_SQUARE_BRACKET);
+        this.holeDepth = 1;
+    }
+
+    /** Track the matcher `cp` in the open hole. Return `true` if `cp` closes the hole. */
+    protected _closesHole(cp: number): boolean {
+        const kind = matcherKind(cp);
+
+        if (kind > 0) {
+            if (this.holeDepth > MAX_MATCHER_DEPTH) {
+                this._failMatchertext(ERR.matchertextDepthLimit);
+            }
+            this.holeMatchers[this.holeDepth++] = kind;
+        } else if (kind < 0) {
+            if (this.holeMatchers[this.holeDepth - 1] !== -kind) {
+                this._failMatchertext(ERR.matchertextUnmatchedCloser);
+            }
+            this.holeDepth--;
+            return this.holeDepth === 0;
+        }
+
+        return false;
+    }
+
+    /** Emit the start tag of a matchertext element, whose content follows the `[` just read. */
+    protected _startMatchertextElement(): void {
+        const token = this.currentToken as TagToken;
+
+        if (token.type === TokenType.END_TAG) {
+            this._failMatchertext(ERR.matchertextInEndTag);
+        }
+
+        token.matchertext = true;
+        this._openHole();
+        this.emitCurrentTagToken();
+        // The handler switches the state for the content of some elements, but this content is matchertext.
+        this.state = State.MT_ELEMENT_CONTENT;
+    }
+
+    /** Append `data` to the character tokens, split by token type as input characters are. */
+    protected _emitData(data: string): void {
+        let start = 0;
+        let type = getCharacterTokenType(data.charCodeAt(0));
+
+        for (let i = 1; i <= data.length; i++) {
+            const next = i === data.length ? type : getCharacterTokenType(data.charCodeAt(i));
+
+            if (i === data.length || next !== type) {
+                this._ensureCharacterToken(type);
+                this._flushRun(data.slice(start, i));
+                start = i;
+                type = next;
+            }
+        }
+    }
+
+    // Matchertext element content state
+    //------------------------------------------------------------------
+    protected _stateMatchertextElementContent(cp: number): void {
+        switch (cp) {
+            case $.NULL: {
+                this._err(ERR.unexpectedNullCharacter);
+                this._emitChars(REPLACEMENT_CHARACTER);
+                break;
+            }
+            case $.EOF: {
+                this._failMatchertext(ERR.eofInMatchertext);
+                break;
+            }
+            default: {
+                if (this._closesHole(cp)) {
+                    // The end tag is the `]>` that closes the element.
+                    this._createEndTagToken(0);
+                    const token = this.currentToken as TagToken;
+                    token.tagName = this.lastStartTagName;
+                    token.matchertext = true;
+                    this.state = State.MT_ELEMENT_END;
+                } else {
+                    this._emitCodePoint(cp);
+                }
+            }
+        }
+    }
+
+    // Matchertext element end state
+    //------------------------------------------------------------------
+    protected _stateMatchertextElementEnd(cp: number): void {
+        if (cp !== $.GREATER_THAN_SIGN) {
+            this._failMatchertext(ERR.matchertextMissingTerminator);
+        }
+
+        this.state = State.DATA;
+        this.emitCurrentTagToken();
+    }
+
+    // Matchertext attribute value state
+    //------------------------------------------------------------------
+    protected _stateMatchertextAttributeValue(cp: number): void {
+        switch (cp) {
+            case $.NULL: {
+                this._err(ERR.unexpectedNullCharacter);
+                this._extendRunWith(REPLACEMENT_CHARACTER, 0);
+                break;
+            }
+            case $.EOF: {
+                this._failMatchertext(ERR.eofInMatchertext);
+                break;
+            }
+            default: {
+                if (this._closesHole(cp)) {
+                    this.state = State.AFTER_ATTRIBUTE_VALUE_QUOTED;
+                } else {
+                    this._extendRun(cp);
+                }
+            }
+        }
+    }
+
+    // Matchertext section state
+    //------------------------------------------------------------------
+    protected _stateMatchertextSection(cp: number): void {
+        switch (cp) {
+            case $.NULL: {
+                this._err(ERR.unexpectedNullCharacter);
+                this._emitChars(REPLACEMENT_CHARACTER);
+                break;
+            }
+            case $.EOF: {
+                this._failMatchertext(ERR.eofInMatchertext);
+                break;
+            }
+            default: {
+                if (this._closesHole(cp)) {
+                    this.state = State.MT_SECTION_BRACKET;
+                } else {
+                    this._emitCodePoint(cp);
+                }
+            }
+        }
+    }
+
+    // Matchertext section bracket state
+    //------------------------------------------------------------------
+    protected _stateMatchertextSectionBracket(cp: number): void {
+        if (cp !== $.RIGHT_SQUARE_BRACKET) {
+            this._failMatchertext(ERR.matchertextMissingTerminator);
+        }
+
+        this.state = State.MT_SECTION_END;
+    }
+
+    // Matchertext section end state
+    //------------------------------------------------------------------
+    protected _stateMatchertextSectionEnd(cp: number): void {
+        if (cp !== $.GREATER_THAN_SIGN) {
+            this._failMatchertext(ERR.matchertextMissingTerminator);
+        }
+
+        this.state = State.DATA;
     }
 }

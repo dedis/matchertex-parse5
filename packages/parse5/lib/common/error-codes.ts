@@ -67,4 +67,15 @@ export enum ERR {
     misplacedStartTagForHeadElement = 'misplaced-start-tag-for-head-element',
     nestedNoscriptInHead = 'nested-noscript-in-head',
     eofInElementThatCanContainOnlyText = 'eof-in-element-that-can-contain-only-text',
+    // Matchertext errors. A `MatchertextError` carries them; they are not reported as recoverable parse errors.
+    eofInMatchertext = 'eof-in-matchertext',
+    matchertextUnmatchedCloser = 'matchertext-unmatched-closer',
+    matchertextDepthLimit = 'matchertext-depth-limit',
+    matchertextMissingTerminator = 'matchertext-missing-terminator',
+    matchertextInEndTag = 'matchertext-in-end-tag',
+    matchertextElementCannotHoldText = 'matchertext-element-cannot-hold-text',
+    matchertextInvalidArgument = 'matchertext-invalid-argument',
+    matchertextArgumentOutsideHole = 'matchertext-argument-outside-hole',
+    matchertextUnserializableText = 'matchertext-unserializable-text',
+    matchertextUnserializableComment = 'matchertext-unserializable-comment',
 }

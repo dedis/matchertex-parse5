@@ -3,7 +3,19 @@ import { html, parse, parseFragment, serialize, serializeOuter, type DefaultTree
 import { generateSerializerTests } from 'parse5-test-utils/utils/generate-serializer-tests.js';
 import { treeAdapters, generateTestsForEachTreeAdapter } from 'parse5-test-utils/utils/common.js';
 
-generateSerializerTests('serializer', 'Serializer', serialize);
+// The suite expects the output of the HTML fragment serialization algorithm.
+generateSerializerTests('serializer (fragment serialization algorithm)', 'Serializer', (document, opts) =>
+    serialize(document, { ...opts, matchertext: false }),
+);
+// The default guard changes only the output of trees that a parser reads back differently.
+generateSerializerTests('serializer', 'Serializer', serialize, {
+    expectErrors: [
+        // No end tag ends `plaintext`, so a parser does not read its text back.
+        18,
+        // The guard writes the line feed that a parser drops at the start of `pre`, `textarea` and `listing`.
+        27,
+    ],
+});
 
 describe('serializer', () => {
     describe("Regression - Get text node's parent tagName only if it's an Element node (GH-38)", () => {

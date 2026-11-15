@@ -76,6 +76,10 @@ describe('SAX parser', () => {
     for (const [idx, data] of loadSAXParserTestData().entries())
         it(`${idx + 1}.${data.name}`, createBasicTest(data.src, data.expected));
 
+    // The data has no matchertext syntax, so the matchertext option must not change the events.
+    for (const [idx, data] of loadSAXParserTestData().entries())
+        it(`${idx + 1}.${data.name} (matchertext)`, createBasicTest(data.src, data.expected, { matchertext: true }));
+
     it('Piping and .stop()', async () => {
         const parser = new SAXParser();
         const writable = new WritableStreamStub();
