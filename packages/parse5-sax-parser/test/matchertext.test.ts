@@ -28,6 +28,33 @@ describe('SAX parser matchertext', () => {
         ]);
     });
 
+    it('emits the content of a matchertext element as one text at every split point', async () => {
+        const html = '<div [a b\n(c) <i>\0]><p title=[x]>';
+
+        for (let k = 0; k <= html.length; k++) {
+            const parser = new SAXParser({ matchertext: true });
+            const result: unknown[] = [];
+
+            parser.on('startTag', ({ tagName, matchertext }) => result.push(['start', tagName, matchertext]));
+            parser.on('endTag', ({ tagName, matchertext }) => result.push(['end', tagName, matchertext]));
+            parser.on('text', ({ text }) => result.push(['text', text]));
+            parser.write(html.slice(0, k));
+            parser.end(html.slice(k));
+            await finished(parser);
+
+            assert.deepEqual(
+                result,
+                [
+                    ['start', 'div', true],
+                    ['text', 'a b\n(c) <i>\uFFFD'],
+                    ['end', 'div', true],
+                    ['start', 'p', undefined],
+                ],
+                `split at ${k}`,
+            );
+        }
+    });
+
     it('keeps a leading line feed', async () => {
         assert.deepEqual(await events('<pre [\nx]>', { matchertext: true }), ['<pre>', String.raw`"\nx"`, '</pre>']);
     });

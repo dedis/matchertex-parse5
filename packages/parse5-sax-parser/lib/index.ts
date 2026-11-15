@@ -12,8 +12,8 @@ export interface SAXParserOptions {
     sourceCodeLocationInfo?: boolean;
     /**
      * Enables the matchertext syntax, as the `matchertext` option of `parse5` describes. The content of a
-     * matchertext element is one text token between its start and end tags. Malformed matchertext fails the
-     * stream with a `MatchertextError`.
+     * matchertext element is one text token between its start and end tags, which have `matchertext` set.
+     * Malformed matchertext fails the stream with a `MatchertextError`.
      *
      * @default `false`
      */
@@ -206,6 +206,9 @@ export class SAXParser extends Transform implements TokenHandler {
             selfClosing: token.selfClosing,
             sourceCodeLocation: token.location,
         };
+        if (token.matchertext) {
+            startTag.matchertext = true;
+        }
         this.emitIfListenerExists('startTag', startTag);
     }
 
@@ -217,6 +220,9 @@ export class SAXParser extends Transform implements TokenHandler {
             tagName: token.tagName,
             sourceCodeLocation: token.location,
         };
+        if (token.matchertext) {
+            endTag.matchertext = true;
+        }
         this.emitIfListenerExists('endTag', endTag);
     }
 
@@ -278,11 +284,15 @@ export interface StartTag extends SaxToken {
     attrs: Token.Attribute[];
     /** Indicates if the tag is self-closing */
     selfClosing: boolean;
+    /** Set if the tag starts a matchertext element `<tag attrs [content]>`. */
+    matchertext?: boolean;
 }
 
 export interface EndTag extends SaxToken {
     /** Tag name */
     tagName: string;
+    /** Set if the tag is the `]>` that ends a matchertext element. */
+    matchertext?: boolean;
 }
 
 export interface Text extends SaxToken {

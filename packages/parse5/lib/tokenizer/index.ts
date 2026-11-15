@@ -514,6 +514,9 @@ export class Tokenizer {
             this.currentToken ||
             this.state === State.DOCTYPE ||
             this.state === State.BEFORE_DOCTYPE_NAME ||
+            // The content of a matchertext element is one text token.
+            this.state === State.MT_ELEMENT_CONTENT ||
+            this.state === State.MT_ELEMENT_END ||
             !this.preprocessor.willDropParsedChunk()
         ) {
             return;
@@ -3333,21 +3336,21 @@ export class Tokenizer {
         this.state = State.MT_ELEMENT_CONTENT;
     }
 
-    /** Append `data` to the character tokens, split by token type as input characters are. */
+    /**
+     * Append `data` to the text of the open hole. Matchertext content is data, so it is one character token, not
+     * split into whitespace and other characters.
+     */
     protected _emitData(data: string): void {
-        let start = 0;
-        let type = getCharacterTokenType(data.charCodeAt(0));
-
-        for (let i = 1; i <= data.length; i++) {
-            const next = i === data.length ? type : getCharacterTokenType(data.charCodeAt(i));
-
-            if (i === data.length || next !== type) {
-                this._ensureCharacterToken(type);
-                this._flushRun(data.slice(start, i));
-                start = i;
-                type = next;
-            }
+        if (data.length > 0) {
+            this._ensureCharacterToken(TokenType.CHARACTER);
+            this._flushRun(data);
         }
+    }
+
+    /** Append the current input code point, read as `cp`, to the text of the open hole. */
+    protected _emitHoleCodePoint(cp: number): void {
+        this._ensureCharacterToken(TokenType.CHARACTER);
+        this._extendRun(cp);
     }
 
     // Matchertext element content state
@@ -3372,7 +3375,7 @@ export class Tokenizer {
                     token.matchertext = true;
                     this.state = State.MT_ELEMENT_END;
                 } else {
-                    this._emitCodePoint(cp);
+                    this._emitHoleCodePoint(cp);
                 }
             }
         }
@@ -3429,7 +3432,7 @@ export class Tokenizer {
                 if (this._closesHole(cp)) {
                     this.state = State.MT_SECTION_BRACKET;
                 } else {
-                    this._emitCodePoint(cp);
+                    this._emitHoleCodePoint(cp);
                 }
             }
         }
