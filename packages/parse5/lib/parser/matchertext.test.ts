@@ -188,15 +188,26 @@ describe('matchertext parsing', () => {
         });
     });
 
+    describe('a `[` whose matched `]` is not followed by `>`', () => {
+        for (const html of [
+            '<input [value]="x">',
+            '<div [hidden]="h" (click)="f()">a</div>',
+            '<p [(ngModel)]="v">',
+            '<div [a]x>',
+            '<div [a] b>',
+            '<div [a)]>',
+            '<div [a',
+            '<a [>',
+            '<a a [>',
+        ]) {
+            it(`reads \`${html}\` as stock HTML does`, () => {
+                assert.strictEqual(serialize(parseFragment(html, MT)), serialize(parseFragment(html)));
+            });
+        }
+    });
+
     describe('errors', () => {
         for (const [html, code, col] of [
-            ['<div [a', ErrorCodes.eofInMatchertext, 8],
-            ['<div [a)]>', ErrorCodes.matchertextUnmatchedCloser, 8],
-            ['<div [a]', ErrorCodes.matchertextMissingTerminator, 9],
-            ['<div [a]x', ErrorCodes.matchertextMissingTerminator, 9],
-            ['<a [b]="x">', ErrorCodes.matchertextMissingTerminator, 7],
-            ['<a [>', ErrorCodes.eofInMatchertext, 6],
-            ['<a a [>', ErrorCodes.eofInMatchertext, 8],
             ['</div [x]>', ErrorCodes.matchertextInEndTag, 7],
             ['<div x=[a', ErrorCodes.eofInMatchertext, 10],
             ['<div x=[a}]>', ErrorCodes.matchertextUnmatchedCloser, 10],
@@ -206,7 +217,7 @@ describe('matchertext parsing', () => {
             ['<br [x]>', ErrorCodes.matchertextElementCannotHoldText, 5],
             ['<img [x]>', ErrorCodes.matchertextElementCannotHoldText, 6],
             ['<image [x]>', ErrorCodes.matchertextElementCannotHoldText, 8],
-            ['<input [value]="x">', ErrorCodes.matchertextElementCannotHoldText, 8],
+            ['<input [x]>', ErrorCodes.matchertextElementCannotHoldText, 8],
             ['<table [x]>', ErrorCodes.matchertextElementCannotHoldText, 8],
             ['<table><tbody [x]>', ErrorCodes.matchertextElementCannotHoldText, 15],
             ['<table><tr [x]>', ErrorCodes.matchertextElementCannotHoldText, 12],
@@ -235,7 +246,7 @@ describe('matchertext parsing', () => {
         });
 
         it('reports the line of the error', () => {
-            assert.deepEqual(errorOf(() => parseFragment('<p>\n\n<div [(]>', MT)).location?.startLine, 3);
+            assert.deepEqual(errorOf(() => parseFragment('<p>\n\n<div x=[(]>', MT)).location?.startLine, 3);
         });
     });
 
@@ -387,11 +398,32 @@ describe('matchertext parsing', () => {
         it('reads input inserted in a hole', () => {
             const parser = new Parser<DefaultTreeAdapterMap>(MT);
 
-            parser.tokenizer.write('<div [ab', false);
+            // An attribute hole: the `[` of an element hole is decided only at its `]>`, and input is inserted where
+            // the tokenizer stands, which is before an undecided `[`.
+            parser.tokenizer.write('<div x=[ab', false);
             parser.tokenizer.insertHtmlAtCurrentPos('c]>');
             parser.tokenizer.write('x', true);
 
-            assert.strictEqual(serialize(parser.document, TREE), serialize(parse('<div [abc]>x', MT), TREE));
+            assert.strictEqual(serialize(parser.document, TREE), serialize(parse('<div x=[abc]>x', MT), TREE));
+        });
+
+        it('decides a `[` whose `]>` comes in a later chunk', () => {
+            for (const chunks of [
+                ['<p [a', 'b]', '>x'],
+                ['<p [', '(', ')]', '>'],
+                ['<p [a', ']', '="x">'],
+                ['<p [a', ']', ' b>'],
+            ]) {
+                const parser = new Parser<DefaultTreeAdapterMap>(MT);
+                for (const chunk of chunks) parser.tokenizer.write(chunk, false);
+                parser.tokenizer.write('', true);
+
+                assert.strictEqual(
+                    serialize(parser.document, TREE),
+                    serialize(parse(chunks.join(''), MT), TREE),
+                    JSON.stringify(chunks),
+                );
+            }
         });
     });
 

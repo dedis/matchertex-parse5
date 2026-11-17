@@ -22,7 +22,7 @@ import {
 import { HtmlEntityDecoder, DecodingMode } from 'entities/decode';
 import { ERR, type ParserErrorHandler } from '../common/error-codes.js';
 import { TAG_ID, getTagID } from '../common/html.js';
-import { MAX_MATCHER_DEPTH, MatchertextError, matcherKind } from '../common/matchertext.js';
+import { MAX_MATCHER_DEPTH, MatchertextError, matcherKind, verifyMatchertext } from '../common/matchertext.js';
 
 // The few attributes a tag usually has are scanned for a duplicate name; from this many on, the names are
 // collected in a Set instead, so that the check doesn't get quadratic in the number of attributes.
@@ -189,8 +189,10 @@ export interface TokenizerOptions {
     /**
      * Enables the matchertext syntax: the element `<tag attrs [content]>`, the attribute value `name=[value]` and
      * the section `<![MDATA[content]]>`. The content is not markup and has no character references: it ends at the
-     * `]` that matches its opening `[`, with the matcher pairs `()`, `[]` and `{}` matched in between. Malformed
-     * matchertext throws a {@link MatchertextError}.
+     * `]` that matches its opening `[`, with the matcher pairs `()`, `[]` and `{}` matched in between. A `[` where an
+     * attribute name may start opens element content only if its matched `]` is directly followed by `>`; otherwise
+     * it starts an attribute name, as in stock HTML (Angular's `[prop]="x"`). Malformed matchertext throws a
+     * {@link MatchertextError}.
      *
      * @default `false`
      */
@@ -262,6 +264,11 @@ export class Tokenizer {
     /** The open matchers of the matchertext hole being read, its `[` first. The value in it nests one less deep. */
     private readonly holeMatchers = new Uint8Array(MAX_MATCHER_DEPTH + 1);
     private holeDepth = 0;
+    /** The code units after an undecided `[` that `_opensMatchertextElement` has read; 0 when none is undecided. */
+    private elementScan = 0;
+    /** Values inserted after an undecided `[`, each with the input offset at which it goes, and the next to emit. */
+    private readonly pendingValues: { offset: number; data: string }[] = [];
+    private pendingValueIndex = 0;
 
     constructor(
         protected options: TokenizerOptions,
@@ -483,9 +490,15 @@ export class Tokenizer {
 
     /**
      * @internal Append `value` as data to the matchertext hole in which the input written so far ends, without
-     * tokenizing it. The value is normalized as input is: CR and CRLF become LF, and NUL becomes U+FFFD.
+     * tokenizing it. The value must be matchertext. It is normalized as input is: CR and CRLF become LF, and NUL
+     * becomes U+FFFD.
      */
     public insertMatchertextValue(value: string): void {
+        if (!verifyMatchertext(value)) {
+            // The value is not input, so the error has no input location.
+            throw new MatchertextError(ERR.matchertextInvalidArgument, null);
+        }
+
         const data = value.replace(/\r\n?/g, '\n').replace(/\0/g, REPLACEMENT_CHARACTER);
 
         switch (this.state) {
@@ -499,7 +512,14 @@ export class Tokenizer {
                 break;
             }
             default: {
-                this._failMatchertext(ERR.matchertextArgumentOutsideHole);
+                if (this.elementScan === 0) {
+                    this._failMatchertext(ERR.matchertextArgumentOutsideHole);
+                }
+                // The `[` before the value is not decided yet. The value is data of the element if the `[` opens one.
+                this.pendingValues.push({
+                    offset: this.preprocessor.droppedBufferSize + this.preprocessor.html.length,
+                    data,
+                });
             }
         }
     }
@@ -1978,9 +1998,7 @@ export class Tokenizer {
                 break;
             }
             default: {
-                if (cp === $.LEFT_SQUARE_BRACKET && this.options.matchertext) {
-                    this._startMatchertextElement();
-                } else {
+                if (cp !== $.LEFT_SQUARE_BRACKET || !this.options.matchertext || !this._matchertextBracket()) {
                     this._createAttr('');
                     this.state = State.ATTRIBUTE_NAME;
                     this._stateAttributeName(cp);
@@ -2058,9 +2076,7 @@ export class Tokenizer {
                 break;
             }
             default: {
-                if (cp === $.LEFT_SQUARE_BRACKET && this.options.matchertext) {
-                    this._startMatchertextElement();
-                } else {
+                if (cp !== $.LEFT_SQUARE_BRACKET || !this.options.matchertext || !this._matchertextBracket()) {
                     this._createAttr('');
                     this.state = State.ATTRIBUTE_NAME;
                     this._stateAttributeName(cp);
@@ -3321,6 +3337,75 @@ export class Tokenizer {
         return false;
     }
 
+    /**
+     * Report whether the `[` just read opens matchertext element content: whether its matched `]` is directly
+     * followed by `>`. Otherwise it starts an attribute name. Return `null` if the input ends before the answer and
+     * more is to come: the scan resumes where it stopped, so it reads each code unit once. Nesting deeper than the
+     * limit opens the element, whose content reader refuses it.
+     */
+    protected _opensMatchertextElement(): boolean | null {
+        if (this.elementScan === 0) {
+            this.holeMatchers[0] = matcherKind($.LEFT_SQUARE_BRACKET);
+            this.holeDepth = 1;
+            this.elementScan = 1;
+        }
+
+        let opens = false;
+
+        for (;;) {
+            const cp = this.preprocessor.peek(this.elementScan);
+
+            if (cp === $.EOF) {
+                if (this.preprocessor.endOfChunkHit) {
+                    return null;
+                }
+                break;
+            }
+            if (this.holeDepth === 0) {
+                opens = cp === $.GREATER_THAN_SIGN;
+                break;
+            }
+
+            const kind = matcherKind(cp);
+
+            this.elementScan++;
+            if (kind > 0) {
+                if (this.holeDepth > MAX_MATCHER_DEPTH) {
+                    opens = true;
+                    break;
+                }
+                this.holeMatchers[this.holeDepth++] = kind;
+            } else if (kind < 0) {
+                if (this.holeMatchers[this.holeDepth - 1] !== -kind) {
+                    break;
+                }
+                this.holeDepth--;
+            }
+        }
+
+        this.elementScan = 0;
+        return opens;
+    }
+
+    /**
+     * Handle a `[` where an attribute name may start: open matchertext element content, or wait for more input to
+     * decide. Return `false` if the `[` starts an attribute name.
+     */
+    protected _matchertextBracket(): boolean {
+        const opens = this._opensMatchertextElement();
+
+        if (opens === null) {
+            this._ensureHibernation();
+            return true;
+        }
+        if (opens) {
+            this._startMatchertextElement();
+        } else if (this.pendingValues.length > 0) {
+            this._failMatchertext(ERR.matchertextArgumentOutsideHole);
+        }
+        return opens;
+    }
+
     /** Emit the start tag of a matchertext element, whose content follows the `[` just read. */
     protected _startMatchertextElement(): void {
         const token = this.currentToken as TagToken;
@@ -3356,6 +3441,14 @@ export class Tokenizer {
     // Matchertext element content state
     //------------------------------------------------------------------
     protected _stateMatchertextElementContent(cp: number): void {
+        // A value inserted before its `[` was decided goes in where it was inserted.
+        while (
+            this.pendingValueIndex < this.pendingValues.length &&
+            this.pendingValues[this.pendingValueIndex].offset <= this.preprocessor.offset
+        ) {
+            this._emitData(this.pendingValues[this.pendingValueIndex++].data);
+        }
+
         switch (cp) {
             case $.NULL: {
                 this._err(ERR.unexpectedNullCharacter);
@@ -3368,6 +3461,8 @@ export class Tokenizer {
             }
             default: {
                 if (this._closesHole(cp)) {
+                    this.pendingValues.length = 0;
+                    this.pendingValueIndex = 0;
                     // The end tag is the `]>` that closes the element.
                     this._createEndTagToken(0);
                     const token = this.currentToken as TagToken;

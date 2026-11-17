@@ -1,6 +1,4 @@
 import { Parser, type ParserOptions } from './parser/index.js';
-import { ERR } from './common/error-codes.js';
-import { MatchertextError, verifyMatchertext } from './common/matchertext.js';
 import type { Tokenizer } from './tokenizer/index.js';
 
 import type { DefaultTreeAdapterMap } from './tree-adapters/default.js';
@@ -174,10 +172,6 @@ function writeTemplateValue(tokenizer: Tokenizer, value: unknown, depth: number)
     }
 
     if (typeof value === 'string') {
-        if (!verifyMatchertext(value)) {
-            throw new MatchertextError(ERR.matchertextInvalidArgument, null);
-        }
-
         tokenizer.insertMatchertextValue(value);
     } else if (Array.isArray(value)) {
         for (const item of value) {

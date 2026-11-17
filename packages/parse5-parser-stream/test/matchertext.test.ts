@@ -37,7 +37,7 @@ describe('ParserStream matchertext', () => {
         const parser = new ParserStream(MT);
         const error = failure(parser);
 
-        parser.write('<div [a');
+        parser.write('<div x=[a');
         parser.end(')]>');
 
         const { code } = await error;
@@ -49,7 +49,7 @@ describe('ParserStream matchertext', () => {
         const error = failure(parser);
 
         parser.on('script', (_element, _documentWrite, resume) => resume());
-        parser.end('<script [a]><div [(]>');
+        parser.end('<script [a]><div x=[(]>');
 
         const { code } = await error;
         assert.strictEqual(code, ErrorCodes.matchertextUnmatchedCloser);

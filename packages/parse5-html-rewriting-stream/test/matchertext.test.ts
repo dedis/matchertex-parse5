@@ -122,6 +122,9 @@ describe('RewritingStream matchertext', () => {
     });
 
     it('fails the stream for malformed matchertext', async () => {
-        assert.strictEqual(codeOf(await rewrite(['<div [a', ')]>'], () => {})), ErrorCodes.matchertextUnmatchedCloser);
+        assert.strictEqual(
+            codeOf(await rewrite(['<div x=[a', ')]>'], () => {})),
+            ErrorCodes.matchertextUnmatchedCloser,
+        );
     });
 });

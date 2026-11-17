@@ -63,7 +63,7 @@ describe('SAX parser matchertext', () => {
         const parser = new SAXParser({ matchertext: true });
         const done = finished(parser);
 
-        parser.end('<div [a');
+        parser.end('<div x=[a');
 
         const error = await done.then(
             () => null,

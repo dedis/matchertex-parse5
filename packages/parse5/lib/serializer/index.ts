@@ -50,11 +50,12 @@ export interface SerializerOptions<T extends TreeAdapterTypeMap> {
      */
     scriptingEnabled?: boolean;
     /**
-     * Refuses a tree that a parser would read back with a different structure, and throws a `MatchertextError` for
-     * it: raw text that contains the end tag of its element or that has a child which is not text, `plaintext`,
-     * which no end tag ends, and comment data that ends the comment. Also writes the line feed that a parser drops
-     * at the start of `pre`, `textarea` and `listing` content. The line breaks and NUL characters that a parser
-     * normalizes are not kept.
+     * Refuses raw text and comments that a parser would read back as other markup, and throws a
+     * `MatchertextError` for them: raw text that contains the end tag of its element or that has a child which is
+     * not text, `plaintext`, which no end tag ends, and comment data that ends the comment. Also writes the line
+     * feed that a parser drops at the start of `pre`, `textarea` and `listing` content. The line breaks and NUL
+     * characters that a parser normalizes are not kept. Other markup that a parser reads back differently, such as
+     * an element that moves to another namespace, is not checked.
      *
      * Set to `false` for the output of the HTML fragment serialization algorithm, which can write such a tree as
      * markup that a parser reads as other elements.

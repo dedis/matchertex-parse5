@@ -131,9 +131,29 @@ describe('composeHtml', () => {
 
     it('refuses malformed matchertext in the template', () => {
         assert.strictEqual(
-            errorOf(() => composeHtml(htmlTemplate`<p [${'v'}]x`)).code,
-            ErrorCodes.matchertextMissingTerminator,
+            errorOf(() => composeHtml(htmlTemplate`<p x=[${'v'})]>`)).code,
+            ErrorCodes.matchertextUnmatchedCloser,
         );
+    });
+
+    it('refuses a value after a `[` that starts an attribute name', () => {
+        // The matched `]` is not followed by `>`, so the `[` opens no element content.
+        for (const host of [
+            (v: string): HtmlTemplate => htmlTemplate`<p [${v}]x>`,
+            (v: string): HtmlTemplate => htmlTemplate`<p [${v}]="y">`,
+            (v: string): HtmlTemplate => htmlTemplate`<p [${v}`,
+        ]) {
+            assert.strictEqual(
+                errorOf(() => composeHtml(host('x'))).code,
+                ErrorCodes.matchertextArgumentOutsideHole,
+                host.toString(),
+            );
+        }
+    });
+
+    it('puts values in an element hole whose `]>` comes in a later piece', () => {
+        const document = composeHtml(htmlTemplate`<p [${'a'}(${'b'})${'c'}]>`);
+        assert.strictEqual(serialize(document), serialize(parse('<p [a(b)c]>', MT)));
     });
 
     it('uses the given options', () => {
