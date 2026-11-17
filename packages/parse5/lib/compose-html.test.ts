@@ -1,5 +1,15 @@
 import { it, assert, describe } from 'vitest';
-import { composeHtml, parse, serialize, verifyMatchertext, MatchertextError, ErrorCodes } from 'parse5';
+import {
+    composeHtml,
+    htmlTemplate,
+    parse,
+    serialize,
+    verifyMatchertext,
+    MatchertextError,
+    ErrorCodes,
+    type HtmlTemplate,
+    type HtmlTemplateValue,
+} from 'parse5';
 import { random, randomString, treeAdapters } from 'parse5-test-utils/utils/common.js';
 
 const MT = { matchertext: true };
@@ -18,8 +28,7 @@ function errorOf(compose: () => unknown): MatchertextError {
 describe('composeHtml', () => {
     it('puts values in element, section and attribute holes', () => {
         const document = composeHtml(
-            ['<p title=[', '] [', ']><svg><![MDATA[', ']]></svg>'],
-            ['a "t" [x]', '<b>not markup</b>', '</svg>'],
+            htmlTemplate`<p title=[${'a "t" [x]'}] [${'<b>not markup</b>'}]><svg><![MDATA[${'</svg>'}]]></svg>`,
         );
 
         assert.strictEqual(
@@ -31,21 +40,28 @@ describe('composeHtml', () => {
 
     it('puts a value between template data of a hole', () => {
         assert.strictEqual(
-            serialize(composeHtml(['<p [(', ' and ', ')]>'], ['a', 'b'])),
+            serialize(composeHtml(htmlTemplate`<p [(${'a'} and ${'b'})]>`)),
             serialize(parse('<p [(a and b)]>', MT)),
         );
     });
 
     it('normalizes values as input', () => {
         assert.strictEqual(
-            serialize(composeHtml(['<p title=[', '] [', ']>'], ['a\r\nb\0', ' \r\0x'])),
-            serialize(parse('<p title=[a\nb�] [ \n�x]>', MT)),
+            serialize(composeHtml(htmlTemplate`<p title=[${'a\r\nb\0'}] [${' \r\0x'}]>`)),
+            serialize(parse('<p title=[a\nb\uFFFD] [ \n\uFFFDx]>', MT)),
         );
     });
 
     it('gives the tree of the template with each value written in its hole', () => {
         const next = random(4);
         const alphabet = ['<', '>', '"', '&amp;', '</p>', '[', ']', '(', ')', '{', '}', ' ', '\n', 'x'];
+        const hosts: [(value: string) => HtmlTemplate, string[]][] = [
+            [(v): HtmlTemplate => htmlTemplate`<p [${v}]>`, ['<p [', ']>']],
+            [(v): HtmlTemplate => htmlTemplate`<pre [${v}]>`, ['<pre [', ']>']],
+            [(v): HtmlTemplate => htmlTemplate`<script [${v}]>`, ['<script [', ']>']],
+            [(v): HtmlTemplate => htmlTemplate`<a title=[${v}]>`, ['<a title=[', ']>']],
+            [(v): HtmlTemplate => htmlTemplate`<p><![MDATA[${v}]]></p>`, ['<p><![MDATA[', ']]></p>']],
+        ];
 
         for (let i = 0; i < 2000; i++) {
             const value = randomString(next, alphabet, 8);
@@ -54,15 +70,9 @@ describe('composeHtml', () => {
                 continue;
             }
 
-            for (const strings of [
-                ['<p [', ']>'],
-                ['<pre [', ']>'],
-                ['<script [', ']>'],
-                ['<a title=[', ']>'],
-                ['<p><![MDATA[', ']]></p>'],
-            ]) {
+            for (const [host, strings] of hosts) {
                 assert.strictEqual(
-                    serialize(composeHtml(strings, [value])),
+                    serialize(composeHtml(host(value))),
                     serialize(parse(strings.join(value), MT)),
                     JSON.stringify([strings, value]),
                 );
@@ -70,42 +80,64 @@ describe('composeHtml', () => {
         }
     });
 
+    it('composes nested templates and arrays at run time', () => {
+        const items = ['a', '<b>', ''].map((item) => htmlTemplate`<li [${item}]>`);
+        const head = htmlTemplate`<p title=[${'t'}]>`;
+
+        assert.strictEqual(
+            serialize(composeHtml(htmlTemplate`${head}<ul>${items}${[]}</ul>`)),
+            serialize(parse('<p title=[t]><ul><li [a]><li [<b>]><li []></ul>', MT)),
+        );
+    });
+
+    it('refuses markup that is not a template literal', () => {
+        const forged = ['<p [', ']>'];
+
+        assert.throws(() => htmlTemplate(forged as unknown as TemplateStringsArray, 'x'), TypeError);
+        assert.throws(() => htmlTemplate(Object.freeze(forged) as unknown as TemplateStringsArray, 'x'), TypeError);
+        assert.throws(() => composeHtml({ strings: forged, values: ['x'] } as unknown as HtmlTemplate), TypeError);
+        assert.throws(() => composeHtml(htmlTemplate`<p>${{} as unknown as string}</p>`), TypeError);
+    });
+
+    it('limits nesting', () => {
+        const cycle: unknown[] = [];
+
+        cycle.push(cycle);
+        assert.throws(() => composeHtml(htmlTemplate`<p>${cycle as HtmlTemplateValue[]}</p>`), TypeError);
+    });
+
     it('refuses a value that is not matchertext', () => {
-        const error = errorOf(() => composeHtml(['<p [', ']>'], ['a]']));
+        const error = errorOf(() => composeHtml(htmlTemplate`<p [${'a]'}]>`));
 
         assert.strictEqual(error.code, ErrorCodes.matchertextInvalidArgument);
         assert.strictEqual(error.location, null);
     });
 
     it('refuses a value outside a hole', () => {
-        for (const strings of [
-            ['<p title="', '">'],
-            ['<p>', '</p>'],
-            ['<p ', '>'],
-            ['', ''],
+        for (const host of [
+            (v: string): HtmlTemplate => htmlTemplate`<p title="${v}">`,
+            (v: string): HtmlTemplate => htmlTemplate`<p>${v}</p>`,
+            (v: string): HtmlTemplate => htmlTemplate`<p ${v}>`,
+            (v: string): HtmlTemplate => htmlTemplate`${v}`,
+            (v: string): HtmlTemplate => htmlTemplate`<p>${[v]}</p>`,
         ]) {
             assert.strictEqual(
-                errorOf(() => composeHtml(strings, ['x'])).code,
+                errorOf(() => composeHtml(host('x'))).code,
                 ErrorCodes.matchertextArgumentOutsideHole,
-                JSON.stringify(strings),
+                host.toString(),
             );
         }
     });
 
     it('refuses malformed matchertext in the template', () => {
         assert.strictEqual(
-            errorOf(() => composeHtml(['<p [', ']x'], ['v'])).code,
+            errorOf(() => composeHtml(htmlTemplate`<p [${'v'}]x`)).code,
             ErrorCodes.matchertextMissingTerminator,
         );
     });
 
-    it('needs one more template string than values', () => {
-        assert.throws(() => composeHtml(['<p [', ']>'], []), TypeError);
-        assert.throws(() => composeHtml(['<p [', ']>'], ['a', 'b']), TypeError);
-    });
-
     it('uses the given options', () => {
-        const document = composeHtml(['<p [', ']>'], ['x'], { treeAdapter: treeAdapters.htmlparser2 });
+        const document = composeHtml(htmlTemplate`<p [${'x'}]>`, { treeAdapter: treeAdapters.htmlparser2 });
         assert.strictEqual(
             serialize(document, { treeAdapter: treeAdapters.htmlparser2 }),
             serialize(parse('<p [x]>', MT)),

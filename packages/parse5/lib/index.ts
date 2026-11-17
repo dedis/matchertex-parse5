@@ -1,6 +1,7 @@
 import { Parser, type ParserOptions } from './parser/index.js';
 import { ERR } from './common/error-codes.js';
 import { MatchertextError, verifyMatchertext } from './common/matchertext.js';
+import type { Tokenizer } from './tokenizer/index.js';
 
 import type { DefaultTreeAdapterMap } from './tree-adapters/default.js';
 import type { TreeAdapterTypeMap } from './tree-adapters/interface.js';
@@ -111,49 +112,123 @@ export function parseFragment<T extends TreeAdapterTypeMap = DefaultTreeAdapterM
 }
 
 /**
- * Parses an HTML document from a matchertext template and values, split as for a tagged template: `values[i]` goes
- * between `strings[i]` and `strings[i + 1]`. The template must put each value in a matchertext hole: the content of
- * an element `<tag [...]>` or section `<![MDATA[...]]>`, or an attribute value `name=[...]`. A value becomes data of
- * its hole without being tokenized, normalized as input is. Each value must be matchertext.
+ * A value of an {@link htmlTemplate}: a string goes into a matchertext hole as data; a template or an array of
+ * values is written in its place.
+ */
+export type HtmlTemplateValue = string | HtmlTemplate | readonly HtmlTemplateValue[];
+
+/** A matchertext HTML template, made only by {@link htmlTemplate}. */
+export interface HtmlTemplate {
+    readonly strings: readonly string[];
+    readonly values: readonly HtmlTemplateValue[];
+}
+
+const templates = new WeakSet<HtmlTemplate>();
+
+/** Nesting limit of templates and arrays in {@link composeHtml}. */
+const MAX_TEMPLATE_DEPTH = 1000;
+
+/**
+ * Makes a matchertext HTML template from a tagged template literal. The markup comes only from template literals of
+ * the program: a call with an array that is not a template object throws a `TypeError`. The template may be built at
+ * run time from nested templates and arrays of them; a string value enters only as data of a hole.
  *
- * Throws a {@link MatchertextError} for a value that is not matchertext, a value outside a hole, or malformed
- * matchertext in the template.
+ * A caller that freezes an array of its own with a frozen `raw` array passes this check, and so opts out of it.
  *
  * @example
  *
  * ```js
- * const parse5 = require('parse5');
+ * const { composeHtml, htmlTemplate } = require('parse5');
  *
- * const document = parse5.composeHtml(['<p title=[', '] [', ']>'], ['a "title"', '<b>not markup</b>']);
+ * const items = ['a', '<b>not markup</b>'].map((item) => htmlTemplate`<li [${item}]>`);
+ * const document = composeHtml(htmlTemplate`<ul title=[${'a "title"'}]>${items}</ul>`);
  * ```
- *
- * @param strings The template strings, one more than the values.
- * @param values The values.
- * @param options Parsing options. The matchertext syntax is always enabled.
  */
-export function composeHtml<T extends TreeAdapterTypeMap = DefaultTreeAdapterMap>(
-    strings: readonly string[],
-    values: readonly string[],
-    options?: ParserOptions<T>,
-): T['document'] {
-    if (strings.length !== values.length + 1) {
-        throw new TypeError('composeHtml needs one more template string than values');
+export function htmlTemplate(strings: TemplateStringsArray, ...values: HtmlTemplateValue[]): HtmlTemplate {
+    // A template object is frozen, as is its raw array; an array built at run time is not.
+    if (
+        !Array.isArray(strings) ||
+        !Object.isFrozen(strings) ||
+        !Array.isArray(strings.raw) ||
+        !Object.isFrozen(strings.raw) ||
+        strings.raw.length !== strings.length ||
+        strings.length !== values.length + 1
+    ) {
+        throw new TypeError('htmlTemplate must be used as a tag of a template literal');
     }
 
-    for (const value of values) {
+    if ((strings as readonly (string | undefined)[]).includes(undefined)) {
+        throw new TypeError('htmlTemplate needs a template literal without invalid escapes');
+    }
+
+    const template: HtmlTemplate = Object.freeze({ strings, values: Object.freeze(values) });
+
+    templates.add(template);
+
+    return template;
+}
+
+function writeTemplateValue(tokenizer: Tokenizer, value: unknown, depth: number): void {
+    if (depth > MAX_TEMPLATE_DEPTH) {
+        throw new TypeError('composeHtml templates nest too deeply');
+    }
+
+    if (typeof value === 'string') {
         if (!verifyMatchertext(value)) {
             throw new MatchertextError(ERR.matchertextInvalidArgument, null);
         }
+
+        tokenizer.insertMatchertextValue(value);
+    } else if (Array.isArray(value)) {
+        for (const item of value) {
+            writeTemplateValue(tokenizer, item, depth + 1);
+        }
+    } else if (templates.has(value as HtmlTemplate)) {
+        const { strings, values } = value as HtmlTemplate;
+
+        for (let i = 0; i < values.length; i++) {
+            tokenizer.write(strings[i], false);
+            writeTemplateValue(tokenizer, values[i], depth + 1);
+        }
+
+        tokenizer.write(strings[values.length], false);
+    } else {
+        throw new TypeError('composeHtml takes strings, and templates made by htmlTemplate');
+    }
+}
+
+/**
+ * Parses an HTML document from a matchertext template made by {@link htmlTemplate}. The template must put each string
+ * value in a matchertext hole: the content of an element `<tag [...]>` or section `<![MDATA[...]]>`, or an attribute
+ * value `name=[...]`. A value becomes data of its hole without being tokenized, normalized as input is. Each value
+ * must be matchertext.
+ *
+ * Throws a `TypeError` for a template not made by {@link htmlTemplate}, and a {@link MatchertextError} for a value
+ * that is not matchertext, a value outside a hole, or malformed matchertext in the template.
+ *
+ * @example
+ *
+ * ```js
+ * const { composeHtml, htmlTemplate } = require('parse5');
+ *
+ * const document = composeHtml(htmlTemplate`<p title=[${'a "title"'}] [${'<b>not markup</b>'}]>`);
+ * ```
+ *
+ * @param template The template.
+ * @param options Parsing options. The matchertext syntax is always enabled.
+ */
+export function composeHtml<T extends TreeAdapterTypeMap = DefaultTreeAdapterMap>(
+    template: HtmlTemplate,
+    options?: ParserOptions<T>,
+): T['document'] {
+    if (!templates.has(template)) {
+        throw new TypeError('composeHtml takes a template made by htmlTemplate');
     }
 
     const parser = new Parser<T>({ ...options, matchertext: true });
 
-    for (let i = 0; i < values.length; i++) {
-        parser.tokenizer.write(strings[i], false);
-        parser.tokenizer.insertMatchertextValue(values[i]);
-    }
-
-    parser.tokenizer.write(strings[values.length], true);
+    writeTemplateValue(parser.tokenizer, template, 0);
+    parser.tokenizer.write('', true);
 
     return parser.document;
 }
